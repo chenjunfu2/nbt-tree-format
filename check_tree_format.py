@@ -105,21 +105,24 @@ def parse_block(path, start, block, report, opts):
             root = NODE_RE.match(body)
             if root and body == body.lstrip():
                 entries.append({'depth': -1, 'branch': False, 'sym': None, 'content': body,
-                                'body': body, 'has_more': False, 'fragment': False})
+                                'body': body, 'has_more': False, 'fragment': False,
+                                'name': root.group(2)})
                 continue
             if body.startswith(' ') and len(body) > 1 and body[1] in (TEE, ELBOW, BRANCH):
                 pass  # 片段示例：首行就是第 1 层
             else:
                 report.add(path, ln, 'root', 'root line must be `symbol`[ **name**]：description at column 0')
                 entries.append({'depth': -1, 'branch': False, 'sym': None, 'content': body,
-                                'body': body, 'has_more': False, 'fragment': True})
+                                'body': body, 'has_more': False, 'fragment': True,
+                                'name': None})
                 continue
 
         m = re.match(r'^([ \u2502]*)([\u251c\u2514\u21b3])(.?)', body)
         if not m:
             report.add(path, ln, 'tree-symbol', 'line has no tree symbol (├─/└─/↳)')
             entries.append({'depth': -1, 'branch': False, 'sym': None, 'content': body,
-                            'body': body, 'has_more': False, 'fragment': False})
+                            'body': body, 'has_more': False, 'fragment': False,
+                            'name': None})
             continue
         sym_idx = len(m.group(1))
         sym = m.group(2)
@@ -145,6 +148,7 @@ def parse_block(path, start, block, report, opts):
             c = body[col] if col < len(body) else ' '
             if c not in (BAR, ' '):
                 report.add(path, ln, 'ancestor', 'column %d is %r, expected "│" or space' % (col, c))
+        name = None
         if is_branch:
             if not BRANCH_RE.match(content):
                 report.add(path, ln, 'branch', 'branch row must start with `key`=value')
@@ -155,11 +159,12 @@ def parse_block(path, start, block, report, opts):
             if not node:
                 report.add(path, ln, 'node', 'node must be `type` [**name**]：description')
             else:
+                name = node.group(2)
                 for token in re.findall(r'`([^`]+)`', node.group(1)):
                     if token not in TYPES:
                         report.add(path, ln, 'type', 'unknown type symbol `%s`' % token)
         entries.append({'depth': depth, 'branch': is_branch, 'sym': sym, 'content': content,
-                        'body': body, 'has_more': False, 'fragment': False})
+                        'body': body, 'has_more': False, 'fragment': False, 'name': name})
     return entries
 
 
@@ -232,6 +237,22 @@ def check_block(path, start, block, entries, report, opts):
         elif '\u9009\u4e00' not in parent['content']:
             report.add(path, start + i, 'branch-parent',
                        'parent row lacks "（n 选一，判别键 X）"')
+
+    # 「判别键 `X`」：裸名要求同层有该行；路径写法视为位置已明确
+    for i, e in enumerate(entries):
+        if e['depth'] < 1 or e['branch']:
+            continue
+        m = re.search('\u5224\u522b\u952e\\s*`([^`]+)`', e['content'])
+        if not m:
+            continue
+        key = m.group(1)
+        if '.' in key or key.startswith('[root]'):
+            continue
+        siblings = [n for n in entries if n is not e and n['depth'] == e['depth']]
+        if not any(n.get('name') == key for n in siblings):
+            report.add(path, start + i, 'discriminator',
+                       'discriminator `%s` is not a sibling row; write a full path '
+                       '(e.g. `tag.%s`) if it is defined elsewhere' % (key, key))
 
 
 def collect_files(paths):
