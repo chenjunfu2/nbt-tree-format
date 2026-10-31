@@ -61,5 +61,3 @@ Copy-Item -Recurse -Force .\nbt-tree-format "$env:USERPROFILE\.agents\skills\nbt
 ## 许可
 
 MIT，详见 [LICENSE](LICENSE)。
-
-作者：chenjunfu2
