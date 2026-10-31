@@ -87,6 +87,28 @@ def extract_md_blocks(lines):
 
 
 
+BRANCH_TYPE_RE = re.compile(r'^((?:`[^`]+`\s*)+?)`([^`]+)`=(.*)$')
+
+
+def parse_branch_content(content):
+    """解析分支行内容「type(s) `key`=value：description」，返回 (info, error)。"""
+    if '\uff1a' not in content:
+        return None, 'branch row must contain "："'
+    left, desc = content.split('\uff1a', 1)
+    m = BRANCH_TYPE_RE.match(left.strip())
+    if not m:
+        return None, 'branch row must be "type(s) `key`=value"'
+    tokens = re.findall(r'`([^`]+)`', m.group(1))
+    if not tokens:
+        return None, 'branch row needs type symbol(s)'
+    bad = [t for t in tokens if t not in TYPES]
+    if bad:
+        return None, 'unknown type symbol(s) in branch row: %s' % ', '.join(bad)
+    if not desc.strip():
+        return None, 'branch row has empty description'
+    return {'types': tokens, 'key': m.group(2), 'value': m.group(3).strip()}, None
+
+
 def parse_block(path, start, block, report, opts):
     """解析一个树块并登记问题；返回解析后的行信息列表。"""
     entries = []          # dict(depth, branch, sym, content, body, has_more, fragment)
@@ -128,9 +150,17 @@ def parse_block(path, start, block, report, opts):
         sym = m.group(2)
         after = m.group(3)
         is_branch = sym == BRANCH
-        if (sym_idx - 1) % 4 != 0:
-            report.add(path, ln, 'grid', 'symbol at column %d, not on the 4-space grid' % sym_idx)
-        depth = (sym_idx - 1) // 4 + 1
+        if sym_idx >= 1 and (sym_idx - 1) % 4 == 0:
+            depth = (sym_idx - 1) // 4 + 1
+        elif sym_idx >= 4 and sym_idx % 4 == 0:
+            depth = sym_idx // 4 + 1
+            parent = next((e for e in reversed(entries) if e['depth'] == depth - 1), None)
+            if parent is None or not parent['branch']:
+                report.add(path, ln, 'grid',
+                           'column %d is only valid for a child of a branch row' % sym_idx)
+        else:
+            report.add(path, ln, 'grid', 'symbol at column %d, not on the grid' % sym_idx)
+            depth = (sym_idx - 1) // 4 + 1 if sym_idx >= 1 else 1
         if is_branch:
             if after != ' ':
                 report.add(path, ln, 'branch', 'branch row must be "↳ " (symbol then one space)')
@@ -150,8 +180,9 @@ def parse_block(path, start, block, report, opts):
                 report.add(path, ln, 'ancestor', 'column %d is %r, expected "│" or space' % (col, c))
         name = None
         if is_branch:
-            if not BRANCH_RE.match(content):
-                report.add(path, ln, 'branch', 'branch row must start with `key`=value')
+            _parsed, err = parse_branch_content(content)
+            if err:
+                report.add(path, ln, 'branch', err)
             if '**' in content.split('\uff1a')[0]:
                 report.add(path, ln, 'branch', 'branch row must not have a bold name')
         else:
@@ -255,6 +286,45 @@ def check_block(path, start, block, entries, report, opts):
                        '(e.g. `tag.%s`) if it is defined elsewhere' % (key, key))
 
 
+OUTER_TITLE_RE = re.compile(r'^#### .+ 分支$')
+OUTER_ITEM_RE = re.compile(r'^- ((?:`[^`]+`\s*)+?)`([^`]+)`=(.+?)\uff1a(.+)$')
+
+
+def check_outer_section(path, start, block, report):
+    """校验树外分支小节块（普通 Markdown 列表，不是树）。"""
+    first = block[0].strip()
+    if not OUTER_TITLE_RE.match(first):
+        report.add(path, start, 'outer', 'outer section must start with "#### <name> 分支"')
+    has_key = False
+    for k, raw in enumerate(block):
+        if k == 0:
+            continue
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith('判别键：'):
+            has_key = True
+            if '`' not in s:
+                report.add(path, start + k, 'outer',
+                           'discriminator line must contain a full path in backticks')
+            continue
+        if s.startswith('- '):
+            m = OUTER_ITEM_RE.match(s)
+            if not m:
+                report.add(path, start + k, 'outer',
+                           'branch item must be "- type(s) `key`=value：description"')
+                continue
+            for token in re.findall(r'`([^`]+)`', m.group(1)):
+                if token not in TYPES:
+                    report.add(path, start + k, 'type', 'unknown type symbol `%s`' % token)
+            continue
+        if s.startswith('#'):
+            continue
+        report.add(path, start + k, 'outer', 'unexpected line in outer section')
+    if not has_key:
+        report.add(path, start, 'outer', 'outer section missing "判别键：" line')
+
+
 def collect_files(paths):
     files = []
     for p in paths:
@@ -305,6 +375,10 @@ def main(argv=None):
                 report.add(path, start, 'blank', 'empty ```md block')
                 continue
             first = next((ln for ln in block if ln.strip()), '')
+            if first.strip().startswith('#### '):
+                report.blocks += 1
+                check_outer_section(path, start, block, report)
+                continue
             has_tree = bool(NODE_RE.match(first[:-1] if first.endswith('\\') else first))
             has_tree = has_tree or any(any(s in ln for s in (TEE, ELBOW, BRANCH)) for ln in block)
             if opts.ignore_non_tree and not has_tree:
