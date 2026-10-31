@@ -1,6 +1,6 @@
 # nbt-tree-format
 
-把 NBT 层级信息（源码定义、NBT 文件、dump、日志或口述）输出为「类型符号 + 加粗名称 + 中文冒号 + 说明」的树形 Markdown 大纲。
+把 NBT 层级信息（源码定义、NBT 文件、dump、日志或口述等）输出为「类型符号 + 加粗名称 + 中文冒号 + 说明」的树形 Markdown 大纲。
 
 ## 效果
 
@@ -39,5 +39,3 @@ Copy-Item -Recurse -Force .\nbt-tree-format "$env:USERPROFILE\.agents\skills\nbt
 ## 许可
 
 MIT，详见 [LICENSE](LICENSE)。
-
-作者：chenjunfu2
