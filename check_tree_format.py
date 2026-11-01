@@ -3,7 +3,8 @@
 """check_tree_format.py — nbt-tree-format 的辅助校验脚本。
 
 扫描给定 Markdown 文件里所有 ```md 树块，按本技能的输出规则做机器校验：
-缩进网格、竖线贯穿、分支行（`↳`）、复合标签子行、行尾反斜杠、节点形状等。
+缩进网格、竖线贯穿、分支行（`↳`）、成员平铺（`（仅 …）`）、复合标签子行、
+行尾反斜杠、节点形状等。
 脚本只做「形态」检查，不判断类型/说明是否符合来源，那部分仍需人工自检。
 
 用法：
@@ -33,9 +34,17 @@ DASH = '\u2500'     # ─
 
 FENCE_RE = re.compile(r'^(`{3,})([^`]*)$')
 NODE_RE = re.compile(r'^((?:`[^`]+`\s*)+)(?:\*\*(.+?)\*\*)?\uff1a(.+)$')
-BRANCH_RE = re.compile(r'^`[^`]+`=')
 
 RELAX_CHILDREN = ('\u7a7a', '\u9012\u5f52', '\u5206\u652f\u89c1')  # 空 / 递归 / 分支见
+
+# 成员平铺（对象级 / 键级多态）：多态行写「（n 选一，判别键 X，成员平铺本级）」
+VARIANT_PAREN_RE = re.compile('\uff08[^\uff09]*\u6210\u5458\u5e73\u94fa[^\uff09]*\uff09')
+VARIANT_MARKER_RE = re.compile(
+    '\uff08([^\uff09]*?)\u9009\u4e00\uff0c\u5224\u522b\u952e\\s*`([^`]+)`([^\uff09]*)\uff09')
+COND_RE = re.compile('\uff08\u4ec5\\s*([^\uff09]+)\uff09')          # （仅 …）
+COND_KV_RE = re.compile('`([^`]+)`\\s*=\\s*`([^`]+)`')
+TOKEN_RE = re.compile('`([^`]+)`')
+EMPTY_DECL_RE = re.compile('`([^`]+)`\\s*\u65e0\u9644\u52a0\u6210\u5458')  # `x` 无附加成员
 
 
 class Report:
@@ -109,9 +118,14 @@ def parse_branch_content(content):
     return {'types': tokens, 'key': m.group(2), 'value': m.group(3).strip()}, None
 
 
-def parse_block(path, start, block, report, opts):
-    """解析一个树块并登记问题；返回解析后的行信息列表。"""
-    entries = []          # dict(depth, branch, sym, content, body, has_more, fragment)
+def parse_block(path, start, block, report):
+    """解析一个树块并登记问题；返回解析后的行信息列表。
+
+    列位模型：子列 = 父列 + 4；父是分支行（`↳`）时子列 = 父列 + 3，
+    因此分支子树会离开 4 的网格，但分支结束后立刻回到网格。
+    """
+    entries = []          # dict(depth, col, branch, sym, content, body, has_more, parent)
+    stack = []            # 祖先链（含根）
     for k, raw in enumerate(block):
         ln = start + k
         if not raw.strip():
@@ -126,41 +140,48 @@ def parse_block(path, start, block, report, opts):
         if k == 0:
             root = NODE_RE.match(body)
             if root and body == body.lstrip():
-                entries.append({'depth': -1, 'branch': False, 'sym': None, 'content': body,
-                                'body': body, 'has_more': False, 'fragment': False,
-                                'name': root.group(2)})
+                entry = {'depth': -1, 'col': 0, 'branch': False, 'sym': None, 'content': body,
+                         'body': body, 'has_more': False,
+                         'name': root.group(2), 'parent': None}
+                entries.append(entry)
+                stack = [entry]
                 continue
             if body.startswith(' ') and len(body) > 1 and body[1] in (TEE, ELBOW, BRANCH):
                 pass  # 片段示例：首行就是第 1 层
             else:
                 report.add(path, ln, 'root', 'root line must be `symbol`[ **name**]：description at column 0')
-                entries.append({'depth': -1, 'branch': False, 'sym': None, 'content': body,
-                                'body': body, 'has_more': False, 'fragment': True,
-                                'name': None})
+                entry = {'depth': -1, 'col': 0, 'branch': False, 'sym': None, 'content': body,
+                         'body': body, 'has_more': False,
+                         'name': None, 'parent': None}
+                entries.append(entry)
+                stack = [entry]
                 continue
 
         m = re.match(r'^([ \u2502]*)([\u251c\u2514\u21b3])(.?)', body)
         if not m:
             report.add(path, ln, 'tree-symbol', 'line has no tree symbol (├─/└─/↳)')
-            entries.append({'depth': -1, 'branch': False, 'sym': None, 'content': body,
-                            'body': body, 'has_more': False, 'fragment': False,
-                            'name': None})
+            entries.append({'depth': -1, 'col': 0, 'branch': False, 'sym': None, 'content': body,
+                            'body': body, 'has_more': False,
+                            'name': None, 'parent': None})
             continue
         sym_idx = len(m.group(1))
         sym = m.group(2)
         after = m.group(3)
         is_branch = sym == BRANCH
-        if sym_idx >= 1 and (sym_idx - 1) % 4 == 0:
-            depth = (sym_idx - 1) // 4 + 1
-        elif sym_idx >= 4 and sym_idx % 4 == 0:
-            depth = sym_idx // 4 + 1
-            parent = next((e for e in reversed(entries) if e['depth'] == depth - 1), None)
-            if parent is None or not parent['branch']:
-                report.add(path, ln, 'grid',
-                           'column %d is only valid for a child of a branch row' % sym_idx)
+        while stack and stack[-1]['col'] >= sym_idx:
+            stack.pop()
+        parent = stack[-1] if stack else None
+        if parent is None or parent['depth'] < 0:
+            depth = 1
+            want_col = 1
         else:
-            report.add(path, ln, 'grid', 'symbol at column %d, not on the grid' % sym_idx)
-            depth = (sym_idx - 1) // 4 + 1 if sym_idx >= 1 else 1
+            depth = parent['depth'] + 1
+            want_col = parent['col'] + (3 if parent['branch'] else 4)
+        if sym_idx != want_col:
+            report.add(path, ln, 'grid',
+                       'symbol at column %d, expected %d (parent at column %d%s)'
+                       % (sym_idx, want_col, parent['col'] if parent else 0,
+                          '，父是分支行' if parent and parent['branch'] else ''))
         if is_branch:
             if after != ' ':
                 report.add(path, ln, 'branch', 'branch row must be "↳ " (symbol then one space)')
@@ -173,11 +194,6 @@ def parse_block(path, start, block, report, opts):
             content = body[sym_idx + 3:]
         if not content:
             report.add(path, ln, 'node', 'empty description')
-        for lvl in range(1, depth):
-            col = 1 + 4 * (lvl - 1)
-            c = body[col] if col < len(body) else ' '
-            if c not in (BAR, ' '):
-                report.add(path, ln, 'ancestor', 'column %d is %r, expected "│" or space' % (col, c))
         name = None
         if is_branch:
             _parsed, err = parse_branch_content(content)
@@ -194,12 +210,133 @@ def parse_block(path, start, block, report, opts):
                 for token in re.findall(r'`([^`]+)`', node.group(1)):
                     if token not in TYPES:
                         report.add(path, ln, 'type', 'unknown type symbol `%s`' % token)
-        entries.append({'depth': depth, 'branch': is_branch, 'sym': sym, 'content': content,
-                        'body': body, 'has_more': False, 'fragment': False, 'name': name})
+        entry = {'depth': depth, 'col': sym_idx, 'branch': is_branch, 'sym': sym,
+                 'content': content, 'body': body, 'has_more': False,
+                 'name': name, 'parent': parent}
+        entries.append(entry)
+        stack.append(entry)
     return entries
 
 
-def check_block(path, start, block, entries, report, opts):
+def _backticks(text):
+    return [t for t in TOKEN_RE.findall(text) if t not in TYPES]
+
+
+def parse_variant_marker(content):
+    """解析成员平铺标注；不是多态行返回 None，标注残缺返回 {'error': ...}。
+
+    只有写成括号形式的「（…成员平铺…）」才算标注，散文里提到「成员平铺」不算。
+    """
+    if not VARIANT_PAREN_RE.search(content):
+        return None
+    m = VARIANT_MARKER_RE.search(content)
+    if not m:
+        return {'error': 'member-polymorphic row must read '
+                         '"\uff08n \u9009\u4e00\uff0c\u5224\u522b\u952e `X`\uff0c'
+                         '\u6210\u5458\u5e73\u94fa\u672c\u7ea7\uff09"'}
+    return {'key': m.group(2), 'start': m.start(), 'end': m.end()}
+
+
+def condition_pairs(text, default_key):
+    """把「（仅 …）」里的条件解析成 [(key, value), ...]；简写「仅 `值`」用 default_key。"""
+    pairs = [(m.group(1), m.group(2)) for m in COND_KV_RE.finditer(text)]
+    if pairs:
+        return pairs
+    return [(default_key, v) for v in _backticks(text)]
+
+
+def marker_domain(content, marker):
+    """取判别键的取值集合与「`x` 无附加成员」声明；取不到时返回空集合（跳过取值检查）。"""
+    key = marker['key']
+    values = set()
+    for part in (content[:marker['start']], content[marker['end']:]):
+        if '\u4e4b\u4e00' in part:  # 「之一」前的反引号记号就是取值
+            values = set(t for t in _backticks(part.split('\u4e4b\u4e00')[0]) if t != key)
+            break
+    declared_empty = set(m.group(1) for m in EMPTY_DECL_RE.finditer(content))
+    return values, declared_empty
+
+
+def check_variants(path, start, entries, report):
+    """校验成员平铺：多态标注、成员归属、取值集合、取值认领、与分支行互斥。"""
+    markers = []
+    for i, e in enumerate(entries):
+        parsed = parse_variant_marker(e['content'])
+        if parsed is None:
+            continue
+        if 'error' in parsed:
+            report.add(path, start + i, 'variant', parsed['error'])
+            continue
+        parsed['index'] = i
+        d = e['depth']
+        parsed['content'] = e['content']
+        # 判别键就是本行 -> 成员与它同级；否则成员是本行的子行
+        if e.get('name') == parsed['key'] and d >= 1:
+            parsed['member_depth'] = d
+            scope_end = len(entries)
+            for j in range(i + 1, len(entries)):
+                if entries[j]['depth'] < d:
+                    scope_end = j
+                    break
+        else:
+            parsed['member_depth'] = 1 if d < 0 else d + 1
+            scope_end = len(entries)
+            for j in range(i + 1, len(entries)):
+                if entries[j]['depth'] <= d:
+                    scope_end = j
+                    break
+        parsed['scope_end'] = scope_end
+        markers.append(parsed)
+
+    claimed = {id(m): set() for m in markers}
+    for i, e in enumerate(entries):
+        if e['branch'] or e['depth'] < 1:
+            continue
+        m = COND_RE.search(e['content'])
+        if not m or '`' not in m.group(1):
+            continue  # 反引号之外的「（仅 …）」只是普通说明文字
+        owner = None
+        for mk in markers:
+            if mk['index'] < i < mk['scope_end'] and e['depth'] == mk['member_depth']:
+                owner = mk
+        if owner is None:
+            report.add(path, start + i, 'variant-member',
+                       '\u300c\uff08\u4ec5 \u2026\uff09\u300d row has no member-polymorphic row')
+            continue
+        allowed, _declared = marker_domain(owner['content'], owner)
+        for key, value in condition_pairs(m.group(1), owner['key']):
+            if key != owner['key']:
+                report.add(path, start + i, 'variant-member',
+                           'condition key `%s` does not match the discriminator `%s`'
+                           % (key, owner['key']))
+                continue
+            claimed[id(owner)].add(value)
+            if allowed and value not in allowed:
+                report.add(path, start + i, 'variant-value',
+                           'value `%s` is not a discriminator value (%s)'
+                           % (value, ', '.join(sorted(allowed))))
+
+    for mk in markers:
+        # 同一对象不得混用分支行与成员平铺（直接挂在多态行下的分支行即混用）
+        for j in range(mk['index'] + 1, mk['scope_end']):
+            other = entries[j]
+            if other['branch'] and other['parent'] is entries[mk['index']]:
+                report.add(path, start + j, 'variant-mode',
+                           'branch row hangs off a member-polymorphic row')
+                break
+        # 判别键的每个取值都应有成员行认领，或显式声明无附加成员
+        allowed, declared_empty = marker_domain(mk['content'], mk)
+        if not allowed:
+            continue
+        missing = allowed - claimed[id(mk)] - declared_empty
+        if missing:
+            report.add(path, start + mk['index'], 'variant-claim',
+                       'discriminator value(s) %s have no member row (write "\u2026 '
+                       '\u65e0\u9644\u52a0\u6210\u5458" if that variant is empty)'
+                       % ', '.join(sorted(missing)))
+
+
+def check_block(path, start, block, entries, report):
     # has_more：普通节点由符号决定；分支行看后面是否还有同层分支
     for i, e in enumerate(entries):
         if e['depth'] < 1:
@@ -214,30 +351,23 @@ def check_block(path, start, block, entries, report, opts):
                     break
             e['has_more'] = bool(nxt and nxt['depth'] == e['depth'] and nxt['branch'])
 
-    # 祖先列位的竖线
+    # 祖先列位的竖线：沿 parent 链取每个祖先自己的列位
     for i, e in enumerate(entries):
         if e['depth'] < 1:
             continue
-        for lvl in range(1, e['depth']):
-            anc = None
-            for j in range(i - 1, -1, -1):
-                if entries[j]['depth'] == lvl:
-                    anc = entries[j]
-                    break
-            if anc is None:
-                report.add(path, start + i, 'ancestor', 'no ancestor row at level %d' % lvl)
-                continue
-            expect = BAR if anc['has_more'] else ' '
-            col = 1 + 4 * (lvl - 1)
-            c = e['body'][col] if col < len(e['body']) else ' '
+        bars = {}
+        anc = e['parent']
+        while anc is not None and anc['depth'] >= 0:
+            bars[anc['col']] = BAR if anc['has_more'] else ' '
+            anc = anc['parent']
+        for pos in range(0, e['col']):
+            expect = bars.get(pos, ' ')
+            c = e['body'][pos] if pos < len(e['body']) else ' '
             if c != expect:
-                report.add(path, start + i, 'ancestor',
-                           'column %d is %r, expected %r' % (col, c, expect))
+                report.add(path, start + i, 'ancestor' if pos in bars else 'grid',
+                           'column %d is %r, expected %r' % (pos, c, expect))
 
-    text = '\n'.join(e['body'] for e in entries)
-    illustrate_mixed = '\uff08\u6df7\u5408\u5143\u7d20\uff09' in text
-
-    # 复合标签 / 列表必须有子行
+    # 复合标签 / 列表必须有子行（混合元素列表的元素行是多类型行，天然不需要子行）
     for i, e in enumerate(entries):
         if e['depth'] < 1 or e['branch']:
             continue
@@ -249,21 +379,48 @@ def check_block(path, start, block, entries, report, opts):
         nxt_depth = entries[i + 1]['depth'] if i + 1 < len(entries) else -2
         if nxt_depth > e['depth']:
             continue
-        if any(t in e['content'] for t in RELAX_CHILDREN) or illustrate_mixed:
+        if any(t in e['content'] for t in RELAX_CHILDREN):
             continue
         report.add(path, start + i, 'children',
                    'container row has no child row: %s' % e['content'][:40])
+
+    # 混合元素列表：元素行要么一行并列多个类型，要么按类型分行（每行一个类型）
+    mixed_kids = {}
+    for i, e in enumerate(entries):
+        if e['depth'] < 1 or e['branch']:
+            continue
+        parent = e['parent']
+        if parent is None or '\uff08\u6df7\u5408\u5143\u7d20\uff09' not in parent['content']:
+            continue
+        if e['depth'] != parent['depth'] + 1:
+            continue
+        types = [t for t in re.findall(r'`([^`]+)`', e['content'].split('\uff1a')[0]) if t in TYPES]
+        mixed_kids.setdefault(id(parent), []).append((i, e, types))
+    for kids in mixed_kids.values():
+        if len(kids) == 1:
+            i, e, types = kids[0]
+            if len(types) < 2:
+                report.add(path, start + i, 'mixed',
+                           'single element row of a mixed list needs 2+ type symbols '
+                           '(otherwise write one row per type)')
+            else:
+                nxt = entries[i + 1]['depth'] if i + 1 < len(entries) else -2
+                if nxt > e['depth']:
+                    report.add(path, start + i, 'mixed',
+                               'combined element row must not have child rows; '
+                               'write one row per type to expand fields')
+        else:
+            for i, e, types in kids:
+                if len(types) != 1:
+                    report.add(path, start + i, 'mixed',
+                               'per-type element rows of a mixed list must list exactly one type symbol')
 
     # 分支行必须有「n 选一」父行
     for i, e in enumerate(entries):
         if not e['branch']:
             continue
-        parent = None
-        for j in range(i - 1, -1, -1):
-            if entries[j]['depth'] == e['depth'] - 1:
-                parent = entries[j]
-                break
-        if parent is None:
+        parent = e['parent']
+        if parent is None or parent['depth'] < 0:
             report.add(path, start + i, 'branch-parent', 'branch row has no parent row')
         elif '\u9009\u4e00' not in parent['content']:
             report.add(path, start + i, 'branch-parent',
@@ -279,11 +436,13 @@ def check_block(path, start, block, entries, report, opts):
         key = m.group(1)
         if '.' in key or key.startswith('[root]'):
             continue
-        siblings = [n for n in entries if n is not e and n['depth'] == e['depth']]
+        siblings = [n for n in entries if n['depth'] == e['depth']]
         if not any(n.get('name') == key for n in siblings):
             report.add(path, start + i, 'discriminator',
                        'discriminator `%s` is not a sibling row; write a full path '
                        '(e.g. `tag.%s`) if it is defined elsewhere' % (key, key))
+
+    check_variants(path, start, entries, report)
 
 
 OUTER_TITLE_RE = re.compile(r'^#### .+ 分支$')
@@ -388,8 +547,8 @@ def main(argv=None):
                            '```md block contains no tree rows (use --ignore-non-tree to skip)')
                 continue
             report.blocks += 1
-            entries = parse_block(path, start, block, report, opts)
-            check_block(path, start, block, entries, report, opts)
+            entries = parse_block(path, start, block, report)
+            check_block(path, start, block, entries, report)
 
     problems = report.sorted()
     summary = 'nbt-tree-format check — %d file(s), %d tree block(s), %d problem(s)' % (
