@@ -451,6 +451,7 @@ whenToUse: >-
 python check_tree_format.py 报告.md                  # 问题打印到终端
 python check_tree_format.py 报告.md -o check.txt      # 写文本报告
 python check_tree_format.py docs/ --json check.json   # 另出 JSON
+python check_tree_format.py a.md b.md docs/           # 位置参数可给多个文件/目录
 ```
 
 其余参数（`--encoding`、`--ignore-non-tree`、`--quiet`、`--exit-zero`）与用法见 README。

@@ -62,7 +62,7 @@
 python check_tree_format.py 报告.md -o check-report.txt
 ```
 
-位置参数给要检查的文件（也可以给目录，会递归找 `*.md`）；`-o/--output` 指定文本报告路径（省略则打印到终端），`--json` 另出一份 JSON，`--encoding` 指定编码（默认 `utf-8`），`--ignore-non-tree` 跳过非树块，`--quiet` 只打印汇总行，`--exit-zero` 出问题也返回 0。规则名与退出码见 [SKILL.md](SKILL.md) 的「辅助检查脚本」。
+位置参数可以给多个文件或目录（目录会递归找 `*.md`）；`-o/--output` 指定文本报告路径（省略则打印到终端），`--json` 另出一份 JSON，`--encoding` 指定编码（默认 `utf-8`），`--ignore-non-tree` 跳过非树块，`--quiet` 只打印汇总行，`--exit-zero` 出问题也返回 0。规则名与退出码见 [SKILL.md](SKILL.md) 的「辅助检查脚本」。
 
 ## 安装
 
