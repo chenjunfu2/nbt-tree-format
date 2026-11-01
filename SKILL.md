@@ -1,6 +1,12 @@
 ---
 name: nbt-tree-format
-description: Render NBT hierarchy (read from source code, NBT files, dumps, logs, or user dictation) as a hierarchical Markdown outline — one node per line with NBT type symbols, a bold name, a Chinese colon, and a description. Polymorphic keys (one key with several shapes) use `↳` branch rows, or a separate branch section when the branches are complex. When the variant is instead the object's member set — discriminator and variant fields are siblings, e.g. a `type` field selecting which other fields exist — keep the rows flat and tag each member with `（仅 X=值）` (member polymorphism); when several discriminators share one level, every controlled member needs the explicit `（仅 X=值）` and shorthand `（仅 值）` is not allowed; compound conditions are collapsed first, then joined inline with `且`, and long or repeated ones become named `条件「…」` defined outside the tree. Maps whose keys are data-defined use `（开放键集，键为 …）`. Use when asked to output or restate NBT structure/paths in tree form, e.g. "用这种层级方式输出 NBT", "NBT 路径和说明", or when dumping/reading .nbt/.litematic data or NBT definitions in code.
+description: Render NBT structure as a hierarchical Markdown outline — one node per line with a type symbol, a bold name, a Chinese colon and a description; includes notation for polymorphism, recursion, mixed lists, open key sets and compound conditions.
+whenToUse: >-
+  Load when the user asks to output, restate, review or fix NBT structure as a tree
+  ("用这种层级方式输出 NBT", "NBT 路径和说明", "按 NBT 层级整理"), when reading or dumping
+  .nbt / .litematic files, or when documenting NBT structure found in source code
+  (codecs, item / entity / block-entity definitions). Skip for prose explanations that
+  do not need a tree.
 ---
 
 # NBT Tree Format
