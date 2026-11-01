@@ -736,6 +736,20 @@ def main(argv=None):
             elif not cond_defs[name][1]:
                 report.add(path, line_no, 'condition',
                            '条件「%s」的定义为空' % name)
+        # 定义之间可以互相引用，但被引用的必须也有定义
+        for _name, (_ln, body) in cond_defs.items():
+            for m in COND_REF_RE.finditer(body or ''):
+                if m.group(1) not in cond_defs:
+                    report.add(path, _ln, 'condition',
+                               '条件「%s」里引用的「%s」没有定义' % (_name, m.group(1)))
+        # 已定义的条件必须能找到引用，否则树与定义两边不一致
+        ref_names = set(name for _ln, name in refs)
+        for _name, (_ln, body) in cond_defs.items():
+            ref_names.update(m.group(1) for m in COND_REF_RE.finditer(body or ''))
+        for _name, (_ln, _body) in cond_defs.items():
+            if _name not in ref_names:
+                report.add(path, _ln, 'condition',
+                           '命名条件「%s」已定义但没有被引用' % _name)
         cycle = detect_cond_cycles(cond_defs)
         if cycle:
             report.add(path, cond_defs[cycle[0]][0], 'condition',
