@@ -3,7 +3,9 @@
 """check_tree_format.py — nbt-tree-format 的辅助校验脚本。
 
 扫描给定 Markdown 文件里所有 ```md 树块，按本技能的输出规则做机器校验：
-缩进网格、竖线贯穿、分支行（`↳`）、成员平铺（`（仅 …）`）、复合标签子行、
+缩进网格、竖线贯穿、分支行（`↳`）、成员平铺（`（仅 …）`，含同一层多个判别键时
+按条件里的键认领多态行、跨键合取按键分别认领）、键集开放（`（开放键集，键为 …）`）、
+「条件「名称」」引用（须在树块外用「条件「名称」：…」定义）、复合标签子行、
 行尾反斜杠、节点形状等。
 脚本只做「形态」检查，不判断类型/说明是否符合来源，那部分仍需人工自检。
 
@@ -43,8 +45,13 @@ VARIANT_MARKER_RE = re.compile(
     '\uff08([^\uff09]*?)\u9009\u4e00\uff0c\u5224\u522b\u952e\\s*`([^`]+)`([^\uff09]*)\uff09')
 COND_RE = re.compile('\uff08\u4ec5\\s*([^\uff09]+)\uff09')          # （仅 …）
 COND_KV_RE = re.compile('`([^`]+)`\\s*=\\s*`([^`]+)`')
+COND_REF_RE = re.compile('\u6761\u4ef6\u300c([^\u300d]+)\u300d')   # 条件「名称」
+COND_DEF_RE = re.compile('^\\s*(?:[-*]\\s*)?\u6761\u4ef6\u300c([^\u300d]+)\u300d\\s*[\uff1a:]')  # 条件「名称」：定义
+COND_SECTION_RE = re.compile('^####\\s*\u6761\u4ef6\u300c([^\u300d]+)\u300d\\s*$')  # #### 条件「名称」小节
 TOKEN_RE = re.compile('`([^`]+)`')
 EMPTY_DECL_RE = re.compile('`([^`]+)`\\s*\u65e0\u9644\u52a0\u6210\u5458')  # `x` 无附加成员
+# 键集开放（键名由数据决定、无法枚举）：`{}` 行标「（开放键集，键为 …）」，不必给子行
+OPEN_KEYSET_RE = re.compile('\uff08\u5f00\u653e\u952e\u96c6\uff0c\u952e\u4e3a[^\uff09]+\uff09')
 
 
 class Report:
@@ -237,12 +244,30 @@ def parse_variant_marker(content):
     return {'key': m.group(2), 'start': m.start(), 'end': m.end()}
 
 
-def condition_pairs(text, default_key):
-    """把「（仅 …）」里的条件解析成 [(key, value), ...]；简写「仅 `值`」用 default_key。"""
-    pairs = [(m.group(1), m.group(2)) for m in COND_KV_RE.finditer(text)]
-    if pairs:
-        return pairs
-    return [(default_key, v) for v in _backticks(text)]
+def raw_condition_pairs(text):
+    """把「（仅 …）」里的条件解析成 [(key 或 None, value), ...]。
+
+    - 显式写法「（仅 `X`=`v`）」：key 是 X；
+    - 同一键的多个取值「（仅 `X`=`a`、`b`）」：裸值归给它前面最近的那个显式键；
+    - 跨键合取「（仅 `X`=`a` 且 `Y`=`b`）」：每个键各自成对；
+    - 简写「（仅 `v`）」：key 为 None。
+    """
+    kv = [(m.group(1), m.group(2), m.start(), m.end()) for m in COND_KV_RE.finditer(text)]
+    if not kv:
+        return [(None, v) for v in _backticks(text)]
+    pairs = [(key, value) for key, value, _s, _e in kv]
+    for m in TOKEN_RE.finditer(text):
+        if any(s <= m.start() < e for _k, _v, s, e in kv):
+            continue
+        token = m.group(1)
+        if token in TYPES:
+            continue
+        target = None
+        for key, _v, s, _e in kv:
+            if s < m.start():
+                target = key
+        pairs.append((target, token))
+    return pairs
 
 
 def marker_domain(content, marker):
@@ -288,28 +313,63 @@ def check_variants(path, start, entries, report):
         parsed['scope_end'] = scope_end
         markers.append(parsed)
 
+    # 成员多态的「容器」：判别键行算它所在的父对象，对象行算它自己。
+    # 同一容器里有两个以上判别键时，该层的受控成员一律要写显式键，简写按就近认领会认错。
+    for mk in markers:
+        e = entries[mk['index']]
+        mk['container'] = id(e['parent']) if (e.get('name') == mk['key'] and e['parent'] is not None) else id(e)
+    container_sizes = {}
+    for mk in markers:
+        container_sizes[mk['container']] = container_sizes.get(mk['container'], 0) + 1
+
     claimed = {id(m): set() for m in markers}
+    external_containers = set()
     for i, e in enumerate(entries):
         if e['branch'] or e['depth'] < 1:
             continue
         m = COND_RE.search(e['content'])
-        if not m or '`' not in m.group(1):
-            continue  # 反引号之外的「（仅 …）」只是普通说明文字
-        owner = None
-        for mk in markers:
-            if mk['index'] < i < mk['scope_end'] and e['depth'] == mk['member_depth']:
-                owner = mk
-        if owner is None:
-            report.add(path, start + i, 'variant-member',
-                       '\u300c\uff08\u4ec5 \u2026\uff09\u300d row has no member-polymorphic row')
+        if not m:
             continue
-        allowed, _declared = marker_domain(owner['content'], owner)
-        for key, value in condition_pairs(m.group(1), owner['key']):
-            if key != owner['key']:
+        cond = m.group(1)
+        candidates = [mk for mk in markers
+                      if mk['index'] < i < mk['scope_end'] and e['depth'] == mk['member_depth']]
+        if COND_REF_RE.search(cond):
+            # 命名的外部条件：不按判别键认领，所在多态行不再参与取值认领检查
+            if candidates:
+                external_containers.add(candidates[-1]['container'])
+            continue
+        if '`' not in cond:
+            continue  # 反引号之外的「（仅 …）」只是普通说明文字
+        raw = raw_condition_pairs(cond)
+        explicit_keys = [key for key, _v in raw if key]
+        if not explicit_keys:
+            owner = candidates[-1] if candidates else None
+            if owner is None:
                 report.add(path, start + i, 'variant-member',
-                           'condition key `%s` does not match the discriminator `%s`'
-                           % (key, owner['key']))
+                           '\u300c\uff08\u4ec5 \u2026\uff09\u300d\u884c\u627e\u4e0d\u5230\u6240\u5c5e\u7684\u591a\u6001\u884c')
                 continue
+            if container_sizes.get(owner['container'], 0) > 1:
+                report.add(path, start + i, 'variant-short',
+                           '\u540c\u4e00\u5c42\u6709\u591a\u4e2a\u5224\u522b\u952e\uff0c\u53d7\u63a7\u6210\u5458\u5fc5\u987b\u5199\u663e\u5f0f\u300c\uff08\u4ec5 `\u5224\u522b\u952e`=`\u503c`\uff09\u300d\uff0c\u4e0d\u5f97\u7b80\u5199')
+            allowed, _declared = marker_domain(owner['content'], owner)
+            for _key, value in raw:
+                claimed[id(owner)].add(value)
+                if allowed and value not in allowed:
+                    report.add(path, start + i, 'variant-value',
+                               'value `%s` is not a discriminator value (%s)'
+                               % (value, ', '.join(sorted(allowed))))
+            continue
+        # 显式键：每个「键=值」对各自认领对应判别键的多态行（支持跨键合取）
+        for key, value in raw:
+            owner = None
+            for cand in candidates:
+                if cand['key'] == key:
+                    owner = cand
+            if owner is None:
+                report.add(path, start + i, 'variant-member',
+                           '\u6761\u4ef6\u91cc\u7684\u5224\u522b\u952e `%s` \u627e\u4e0d\u5230\u5bf9\u5e94\u7684\u591a\u6001\u884c' % key)
+                continue
+            allowed, _declared = marker_domain(owner['content'], owner)
             claimed[id(owner)].add(value)
             if allowed and value not in allowed:
                 report.add(path, start + i, 'variant-value',
@@ -324,7 +384,10 @@ def check_variants(path, start, entries, report):
                 report.add(path, start + j, 'variant-mode',
                            'branch row hangs off a member-polymorphic row')
                 break
-        # 判别键的每个取值都应有成员行认领，或显式声明无附加成员
+        # 判别键的每个取值都应有成员行认领，或显式声明无附加成员；
+        # 用了「条件「名称」」的容器说明条件写在外面，跳过该检查
+        if mk['container'] in external_containers:
+            continue
         allowed, declared_empty = marker_domain(mk['content'], mk)
         if not allowed:
             continue
@@ -334,6 +397,26 @@ def check_variants(path, start, entries, report):
                        'discriminator value(s) %s have no member row (write "\u2026 '
                        '\u65e0\u9644\u52a0\u6210\u5458" if that variant is empty)'
                        % ', '.join(sorted(missing)))
+
+
+def check_open_keyset(path, start, entries, report):
+    """校验「（开放键集，键为 …）」：标注格式完整，且该行是复合标签。
+
+    只在出现「（开放键集」时校验；散文里提到「开放键集」不算标注。
+    """
+    for i, e in enumerate(entries):
+        if e['depth'] < 1 or e['branch']:
+            continue
+        if '\uff08\u5f00\u653e\u952e\u96c6' not in e['content']:
+            continue
+        if not OPEN_KEYSET_RE.search(e['content']):
+            report.add(path, start + i, 'open-keyset',
+                       '\u5f00\u653e\u952e\u96c6\u884c\u5fc5\u987b\u5199\u6210\u300c\uff08\u5f00\u653e\u952e\u96c6\uff0c\u952e\u4e3a \u2026\uff09\u300d')
+            continue
+        syms = re.findall(r'`([^`]+)`', e['content'].split('\uff1a')[0])
+        if '{}' not in syms:
+            report.add(path, start + i, 'open-keyset',
+                       '\u5f00\u653e\u952e\u96c6\u884c\u5fc5\u987b\u662f\u590d\u5408\u6807\u7b7e\u884c\uff08`{}`\uff09')
 
 
 def check_block(path, start, block, entries, report):
@@ -379,7 +462,9 @@ def check_block(path, start, block, entries, report):
         nxt_depth = entries[i + 1]['depth'] if i + 1 < len(entries) else -2
         if nxt_depth > e['depth']:
             continue
-        if any(t in e['content'] for t in RELAX_CHILDREN):
+        if (any(t in e['content'] for t in RELAX_CHILDREN)
+                or '\uff08\u5f00\u653e\u952e\u96c6' in e['content']
+                or OPEN_KEYSET_RE.search(e['content'])):
             continue
         report.add(path, start + i, 'children',
                    'container row has no child row: %s' % e['content'][:40])
@@ -442,6 +527,7 @@ def check_block(path, start, block, entries, report):
                        'discriminator `%s` is not a sibling row; write a full path '
                        '(e.g. `tag.%s`) if it is defined elsewhere' % (key, key))
 
+    check_open_keyset(path, start, entries, report)
     check_variants(path, start, entries, report)
 
 
@@ -529,6 +615,15 @@ def main(argv=None):
         blocks, unclosed = extract_md_blocks(lines)
         for fence in unclosed:
             report.add(path, fence[3], 'fence', 'unclosed code fence')
+        # 树块外的「条件「名称」：…」定义（单行形式）；树里的引用必须都能找到定义
+        cond_defs = {}
+        for idx, ln in enumerate(lines, 1):
+            dm = COND_DEF_RE.match(ln)
+            if dm:
+                body = ln[dm.end():].strip()
+                if dm.group(1) not in cond_defs or not cond_defs[dm.group(1)][1]:
+                    cond_defs[dm.group(1)] = (idx, body)
+        refs = []
         for start, block in blocks:
             if not block:
                 report.add(path, start, 'blank', 'empty ```md block')
@@ -536,7 +631,19 @@ def main(argv=None):
             first = next((ln for ln in block if ln.strip()), '')
             if first.strip().startswith('#### '):
                 report.blocks += 1
-                check_outer_section(path, start, block, report)
+                sm = COND_SECTION_RE.match(first.strip())
+                if sm:
+                    # `#### 条件「名称」` 小节：标题下的任意 Markdown 就是逻辑
+                    name = sm.group(1)
+                    body = [ln for ln in block[1:] if ln.strip()]
+                    if not body:
+                        report.add(path, start, 'condition',
+                                   '条件「%s」小节是空的' % name)
+                        cond_defs.setdefault(name, (start, ''))
+                    else:
+                        cond_defs.setdefault(name, (start, '\n'.join(body)))
+                else:
+                    check_outer_section(path, start, block, report)
                 continue
             has_tree = bool(NODE_RE.match(first[:-1] if first.endswith('\\') else first))
             has_tree = has_tree or any(any(s in ln for s in (TEE, ELBOW, BRANCH)) for ln in block)
@@ -549,6 +656,18 @@ def main(argv=None):
             report.blocks += 1
             entries = parse_block(path, start, block, report)
             check_block(path, start, block, entries, report)
+            for k, raw_line in enumerate(block):
+                for ref in COND_REF_RE.finditer(raw_line):
+                    refs.append((start + k, ref.group(1)))
+        # 引用校验放在所有块之后，条件小节写在前或在后都可以
+        for line_no, name in refs:
+            if name not in cond_defs:
+                report.add(path, line_no, 'condition',
+                           '条件「%s」没有定义（用「条件「%s」：…」单行或「#### 条件「%s」」小节）'
+                           % (name, name, name))
+            elif not cond_defs[name][1]:
+                report.add(path, line_no, 'condition',
+                           '条件「%s」的定义为空' % name)
 
     problems = report.sorted()
     summary = 'nbt-tree-format check — %d file(s), %d tree block(s), %d problem(s)' % (
