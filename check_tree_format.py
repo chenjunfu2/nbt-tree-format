@@ -136,27 +136,29 @@ def split_node(content):
     return {'types': types, 'name': name, 'condition': condition, 'desc': desc.strip()}
 
 
+COND_DESC_RE = re.compile('「([^」]+)」')
+
+
 def parse_condition(cond):
     """解析条件段；返回 (pairs, refs, error)。
 
     pairs 为 (key, value, negated)；refs 为命名条件名称。
-    语法：项为 `key`=`value` 或 条件「名称」，用 || && ! 与括号组合（C 语义）。
+    语法：项为 `key`=`value`、比较项、条件「名称」，或「描述片段」；
+    用 || && ! 与括号组合（C 语义）。描述片段不参与判别键认领。
     """
     if not cond:
         return [], [], None
-    pairs = []
+    if cond.count('「') != cond.count('」'):
+        return [], [], '条件里的「」没有配对'
     refs = [m.group(1) for m in COND_REF_RE.finditer(cond)]
     rest = COND_REF_RE.sub(' ', cond)
+    rest = COND_DESC_RE.sub(' ', rest)
+    pairs = []
     for m in COND_KV_NEG_RE.finditer(rest):
         pairs.append((m.group(2), m.group(3), True))
     rest = COND_KV_NEG_RE.sub(' ', rest)
     for m in COND_KV_RE.finditer(rest):
         pairs.append((m.group(1), m.group(2), False))
-    rest = COND_KV_RE.sub(' ', rest)
-    rest = rest.replace('||', ' ').replace('&&', ' ').replace('!', ' ')
-    rest = rest.replace('(', ' ').replace(')', ' ')
-    if rest.strip():
-        return pairs, refs, '无法识别的条件片段：%r' % rest.strip()[:30]
     return pairs, refs, None
 
 
