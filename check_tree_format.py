@@ -42,7 +42,8 @@ RELAX_CHILDREN = ('\u7a7a', '\u9012\u5f52', '\u5206\u652f\u89c1')  # 空 / 递�
 # 成员平铺（对象级 / 键级多态）：多态行写「（n 选一，判别键 X，成员平铺本级）」
 VARIANT_PAREN_RE = re.compile('\uff08[^\uff09]*\u6210\u5458\u5e73\u94fa[^\uff09]*\uff09')
 VARIANT_MARKER_RE = re.compile(
-    '\uff08([^\uff09]*?)\u9009\u4e00\uff0c\u5224\u522b\u952e\\s*`([^`]+)`([^\uff09]*)\uff09')
+    # 分隔符既接受全角「，」（skill 文档示例写法），也接受半角「,」（历史脚本写法）
+    '\uff08([^\uff09]*?)\u9009\u4e00[\uff0c,]\u5224\u522b\u952e\\s*`([^`]+)`([^\uff09]*)\uff09')
 COND_KV_NEG_RE = re.compile('(!)\\s*`([^`]+)`\\s*=\\s*`([^`]+)`')    # 取反的键值
 COND_KV_RE = re.compile('`([^`]+)`\\s*=\\s*`([^`]+)`')
 COND_REF_RE = re.compile('\u6761\u4ef6\u300c([^\u300d]+)\u300d')   # 条件「名称」
@@ -267,16 +268,18 @@ def parse_block(path, start, block, report):
         name = None
         types = None
         condition = None
+        exempt = '（特殊描述）' in content
         if is_branch:
             _parsed, err = parse_branch_content(content)
-            if err:
+            if err and not exempt:
                 report.add(path, ln, 'branch', err)
             if '**' in content.split(': ')[0]:
                 report.add(path, ln, 'branch', 'branch row must not have a bold name')
         else:
             node = split_node(content)
             if not node:
-                report.add(path, ln, 'node', 'node must be `type` [**name**] [condition]：description')
+                if not exempt:
+                    report.add(path, ln, 'node', 'node must be `type` [**name**] [condition]：description')
             else:
                 name = node['name']
                 types = node['types']
@@ -284,13 +287,14 @@ def parse_block(path, start, block, report):
                 for token in types:
                     if token not in TYPES:
                         report.add(path, ln, 'type', 'unknown type symbol `%s`' % token)
-                if condition:
+                if condition and not exempt:
                     _pairs, _refs, cerr = parse_condition(condition)
                     if cerr:
                         report.add(path, ln, 'condition', cerr)
         entry = {'depth': depth, 'col': sym_idx, 'branch': is_branch, 'sym': sym,
                  'content': content, 'body': body, 'has_more': False,
-                 'name': name, 'types': types, 'condition': condition, 'parent': parent}
+                 'name': name, 'types': types, 'condition': condition,
+                 'exempt': exempt, 'parent': parent}
         entries.append(entry)
         stack.append(entry)
     return entries
@@ -390,7 +394,7 @@ def check_variants(path, start, entries, report):
     claimed = {id(m): set() for m in markers}
     external_containers = set()
     for i, e in enumerate(entries):
-        if e['branch'] or e['depth'] < 1:
+        if e['branch'] or e['depth'] < 1 or e.get('exempt'):
             continue
         cond = e.get('condition')
         if not cond:
@@ -490,7 +494,7 @@ def check_block(path, start, block, entries, report):
 
     # 复合标签 / 列表必须有子行（混合元素列表的元素行是多类型行，天然不需要子行）
     for i, e in enumerate(entries):
-        if e['depth'] < 1 or e['branch']:
+        if e['depth'] < 1 or e['branch'] or e.get('exempt'):
             continue
         syms = e.get('types') or []
         if syms not in (['{}'], ['[]']):
@@ -510,7 +514,7 @@ def check_block(path, start, block, entries, report):
     # 混合元素列表：元素行要么一行并列多个类型，要么按类型分行（每行一个类型）
     mixed_kids = {}
     for i, e in enumerate(entries):
-        if e['depth'] < 1 or e['branch']:
+        if e['depth'] < 1 or e['branch'] or e.get('exempt'):
             continue
         parent = e['parent']
         if parent is None or '\uff08\u6df7\u5408\u5143\u7d20\uff09' not in parent['content']:
@@ -540,7 +544,7 @@ def check_block(path, start, block, entries, report):
 
     # 分支行必须有「n 选一」父行
     for i, e in enumerate(entries):
-        if not e['branch']:
+        if not e['branch'] or e.get('exempt'):
             continue
         parent = e['parent']
         if parent is None or parent['depth'] < 0:
@@ -551,7 +555,7 @@ def check_block(path, start, block, entries, report):
 
     # 「判别键 `X`」：裸名要求同层有该行；路径写法视为位置已明确
     for i, e in enumerate(entries):
-        if e['depth'] < 1 or e['branch']:
+        if e['depth'] < 1 or e['branch'] or e.get('exempt'):
             continue
         m = re.search('\u5224\u522b\u952e\\s*`([^`]+)`', e['content'])
         if not m:
