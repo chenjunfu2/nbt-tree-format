@@ -1,6 +1,6 @@
 ---
 name: nbt-tree-format
-description: Render NBT structure as a hierarchical Markdown outline — one node per line with a type symbol, a bold name, a Chinese colon and a description; includes notation for polymorphism, recursion, mixed lists, open key sets and compound conditions.
+description: Render NBT structure as a hierarchical Markdown outline — one node per line with a type symbol, a bold name, a Chinese colon and a description; includes notation for polymorphism, recursion, mixed lists, open key sets and compound conditions. Also renders JSON trees when the block starts with a `「JSON」` marker (JSON types: `{}`, `[]`, `""`, `N`, `T/F`, `null`).
 whenToUse: >-
   Load when the user asks to output, restate, review or fix NBT structure as a tree
   ("用这种层级方式输出 NBT", "NBT 路径和说明", "按 NBT 层级整理"), when reading or dumping
@@ -12,7 +12,7 @@ whenToUse: >-
 # NBT Tree Format
 
 把 NBT 层级信息输出为「类型符号 + 加粗名称 + 英文冒号 + 说明」的树形 Markdown 大纲（多态另有写法：值类型多态见「多态键：分支行与树外单开」，成员多态见「多态：成员平铺」，跨键合取与命名条件见「跨键合取与条件命名」；键名由数据决定、无法枚举的映射见「键集开放」）。
-数据来源不限（源码定义、NBT 文件、dump、日志、用户口述等）；本技能只规定**输出形态**，不负责生成或修改 NBT 数据。
+数据来源不限（源码定义、NBT 文件、dump、日志、用户口述等）；本技能只规定**输出形态**，不负责生成或修改 NBT 数据；JSON 树见「JSON（复用 NBT 规则）」。
 
 ## 输出规则
 
@@ -429,6 +429,48 @@ whenToUse: >-
 ## 根节点的名称
 
 根能被任意字段引用（例如 `{}` 可被任意方块实体或实体字段使用）时**不写名称**，写成 `` `{}`: 根标签\ ``；只有根必须是某个指定字段名时，才写成 `` `{}` **tag**: 父标签。\ ``
+
+## JSON（复用 NBT 规则）
+
+需要输出 JSON 结构时，树块**第一行**必须单独写 `「JSON」`（大小写不敏感，`Json 树`、`json 树` 均可），校验器据此切换模式；这一行不是节点，根节点从第二行开始。
+
+JSON 类型符号：
+
+| JSON 类型 | 符号 |
+| --- | --- |
+| object | `{}` |
+| array | `[]` |
+| string | `""` |
+| number | `N` |
+| boolean | `T/F` |
+| null | `null` |
+
+**复用**：行格式与英文冒号、缩进与竖线、条件段、成员平铺、命名条件、递归、键集开放、空集合、特殊豁免、混合元素展开规则，全部沿用 NBT 的对应小节（见「输出规则」「多态键」「多态：成员平铺」「跨键合取与条件命名」「键集开放」「空集合、可选与默认值」「特殊豁免」）。
+
+**与 NBT 不一致的地方**：
+
+- number 只有 `N`，不细分 `B`/`S`/`I`/`L`/`F`/`D`；需要注明整数/浮点时写在说明里。
+- array 只有 `[]`，没有 `[B]`/`[I]`/`[L]`；元素可混合，**不强制**标「（混合元素）」，需要说明元素类型时直接按混合元素规则展开。
+- 根可以是任意 JSON 类型（`{}`、`[]`、`""`、`N`、`T/F`、`null`），不默认 `{}`。
+- object 的键必须是字符串，子行一律用加粗键名；没有 NBT 的数值细分语义。
+
+示例：
+
+````md
+```md
+「JSON」
+`{}` **root**: 根对象。\
+ ├─ `""` **name**: 名称。\
+ ├─ `N` **count**: 数量（整数）。\
+ ├─ `N` **ratio**: 比例（浮点）。\
+ ├─ `T/F` **enabled**: 是否启用。\
+ ├─ `null` **note**: 空值。\
+ └─ `[]` **items**: 元素列表。\
+     └─ `{}` `""`: 分别为对象元素和字符串元素。\
+```
+````
+
+自检：JSON 树必须首行标 `「JSON」`，类型只用上表六种；出现 `B`/`S`/`I`/`L`/`F`/`D`/`[B]` 等 NBT 符号即违规。
 
 ## 特殊豁免（兜底）
 

@@ -27,6 +27,10 @@ import sys
 
 # 类型符号（与 SKILL.md 的「类型符号」一节一致）
 TYPES = {'{}', '[]', '[B]', '[I]', '[L]', 'B', 'S', 'I', 'L', 'F', 'D', 'T/F', '""'}
+# JSON 树（首行标记 `「JSON」`）只用这六种
+TYPES_JSON = {'{}', '[]', '""', 'N', 'T/F', 'null'}
+# 解析节点时识别所有已知符号，再由当前模式判断是否合法（非法时报 type）
+KNOWN_TYPES = TYPES | TYPES_JSON
 
 BRANCH = '\u21b3'   # ↳
 TEE = '\u251c'      # ├
@@ -104,12 +108,13 @@ def extract_md_blocks(lines):
 
 
 
-def split_node(content):
-    """解析节点内容：type(s) [**name**] [condition]：description。
+def split_node(content, types=None):
+    """解析节点内容：type(s) [**name**] [condition]: description。
 
     返回 dict(types, name, condition, desc)；无法识别时返回 None。
     条件段是名称之后、冒号之前的部分，可为 None。
     """
+    allowed = types or KNOWN_TYPES
     if ': ' not in content:
         return None
     idx = content.find(': ')
@@ -117,14 +122,14 @@ def split_node(content):
         return None
     left, desc = content[:idx], content[idx + 2:]
     rest = left.strip()
-    types = []
+    found = []
     while rest.startswith('`'):
         m = re.match(r'`([^`]+)`', rest)
-        if not m or m.group(1) not in TYPES:
+        if not m or m.group(1) not in allowed:
             break
-        types.append(m.group(1))
+        found.append(m.group(1))
         rest = rest[m.end():].lstrip()
-    if not types:
+    if not found:
         return None
     name = None
     if rest.startswith('**'):
@@ -134,7 +139,7 @@ def split_node(content):
         name = m.group(1)
         rest = rest[m.end():].lstrip()
     condition = rest.strip() or None
-    return {'types': types, 'name': name, 'condition': condition, 'desc': desc.strip()}
+    return {'types': found, 'name': name, 'condition': condition, 'desc': desc.strip()}
 
 
 COND_DESC_RE = re.compile('「([^」]+)」')
@@ -166,8 +171,9 @@ def parse_condition(cond):
 BRANCH_TYPE_RE = re.compile(r'^((?:`[^`]+`\s*)+?)`([^`]+)`=(.*)$')
 
 
-def parse_branch_content(content):
-    """解析分支行内容「type(s) `key`=value：description」，返回 (info, error)。"""
+def parse_branch_content(content, types=None):
+    """解析分支行内容「type(s) `key`=value: description」，返回 (info, error)。"""
+    allowed = types or TYPES
     if ': ' not in content:
         return None, 'branch row must contain ": "'
     idx = content.find(': ')
@@ -180,7 +186,7 @@ def parse_branch_content(content):
     tokens = re.findall(r'`([^`]+)`', m.group(1))
     if not tokens:
         return None, 'branch row needs type symbol(s)'
-    bad = [t for t in tokens if t not in TYPES]
+    bad = [t for t in tokens if t not in allowed]
     if bad:
         return None, 'unknown type symbol(s) in branch row: %s' % ', '.join(bad)
     if not desc.strip():
@@ -188,12 +194,13 @@ def parse_branch_content(content):
     return {'types': tokens, 'key': m.group(2), 'value': m.group(3).strip()}, None
 
 
-def parse_block(path, start, block, report):
+def parse_block(path, start, block, report, allowed_types=None):
     """解析一个树块并登记问题；返回解析后的行信息列表。
 
     列位模型：子列 = 父列 + 4；父是分支行（`↳`）时子列 = 父列 + 3，
     因此分支子树会离开 4 的网格，但分支结束后立刻回到网格。
     """
+    allowed = allowed_types or TYPES
     entries = []          # dict(depth, col, branch, sym, content, body, has_more, parent)
     stack = []            # 祖先链（含根）
     for k, raw in enumerate(block):
@@ -270,7 +277,7 @@ def parse_block(path, start, block, report):
         condition = None
         exempt = '（特殊描述）' in content
         if is_branch:
-            _parsed, err = parse_branch_content(content)
+            _parsed, err = parse_branch_content(content, allowed)
             if err and not exempt:
                 report.add(path, ln, 'branch', err)
             if '**' in content.split(': ')[0]:
@@ -285,7 +292,7 @@ def parse_block(path, start, block, report):
                 types = node['types']
                 condition = node['condition']
                 for token in types:
-                    if token not in TYPES:
+                    if token not in allowed:
                         report.add(path, ln, 'type', 'unknown type symbol `%s`' % token)
                 if condition and not exempt:
                     _pairs, _refs, cerr = parse_condition(condition)
@@ -461,7 +468,8 @@ def check_open_keyset(path, start, entries, report):
                        '\u5f00\u653e\u952e\u96c6\u884c\u5fc5\u987b\u662f\u590d\u5408\u6807\u7b7e\u884c\uff08`{}`\uff09')
 
 
-def check_block(path, start, block, entries, report):
+def check_block(path, start, block, entries, report, allowed_types=None):
+    allowed = allowed_types or TYPES
     # has_more：普通节点由符号决定；分支行看后面是否还有同层分支
     for i, e in enumerate(entries):
         if e['depth'] < 1:
@@ -521,7 +529,7 @@ def check_block(path, start, block, entries, report):
             continue
         if e['depth'] != parent['depth'] + 1:
             continue
-        types = [t for t in re.findall(r'`([^`]+)`', e['content'].split(': ')[0]) if t in TYPES]
+        types = list(e.get('types') or [])
         mixed_kids.setdefault(id(parent), []).append((i, e, types))
     for kids in mixed_kids.values():
         if len(kids) == 1:
@@ -701,6 +709,17 @@ def main(argv=None):
                 report.add(path, start, 'blank', 'empty ```md block')
                 continue
             first = next((ln for ln in block if ln.strip()), '')
+            json_mode = False
+            if re.match(r'(?i)^「json」$', first.strip()):
+                json_mode = True
+                block = block[1:]
+                start += 1
+                if not block:
+                    report.blocks += 1
+                    report.add(path, start, 'blank', 'empty JSON tree block')
+                    continue
+                first = next((ln for ln in block if ln.strip()), '')
+            allowed_types = TYPES_JSON if json_mode else TYPES
             if first.strip().startswith('#### '):
                 report.blocks += 1
                 sm = COND_SECTION_RE.match(first.strip())
@@ -726,8 +745,8 @@ def main(argv=None):
                            '```md block contains no tree rows (use --ignore-non-tree to skip)')
                 continue
             report.blocks += 1
-            entries = parse_block(path, start, block, report)
-            check_block(path, start, block, entries, report)
+            entries = parse_block(path, start, block, report, allowed_types)
+            check_block(path, start, block, entries, report, allowed_types)
             for k, raw_line in enumerate(block):
                 for ref in COND_REF_RE.finditer(raw_line):
                     refs.append((start + k, ref.group(1)))
