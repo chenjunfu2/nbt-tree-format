@@ -27,7 +27,7 @@ import sys
 
 # 类型符号（与 SKILL.md 的「类型符号」一节一致）
 TYPES = {'{}', '[]', '[B]', '[I]', '[L]', 'B', 'S', 'I', 'L', 'F', 'D', 'T/F', '""'}
-# JSON 树（首行标记 `「JSON」`）只用这六种
+# JSON 树（首行标记 `「JSON」`）只用这六种；`「JSON-NBT」` 用 NBT 类型
 TYPES_JSON = {'{}', '[]', '""', 'N', 'T/F', 'null'}
 # 解析节点时识别所有已知符号，再由当前模式判断是否合法（非法时报 type）
 KNOWN_TYPES = TYPES | TYPES_JSON
@@ -709,17 +709,19 @@ def main(argv=None):
                 report.add(path, start, 'blank', 'empty ```md block')
                 continue
             first = next((ln for ln in block if ln.strip()), '')
-            json_mode = False
-            if re.match(r'(?i)^「json」$', first.strip()):
-                json_mode = True
+            marker = re.match(r'(?i)^「(json(?:-nbt)?)」$', first.strip())
+            if marker:
+                mode = marker.group(1).lower()
                 block = block[1:]
                 start += 1
                 if not block:
                     report.blocks += 1
-                    report.add(path, start, 'blank', 'empty JSON tree block')
+                    report.add(path, start, 'blank', 'empty JSON block')
                     continue
                 first = next((ln for ln in block if ln.strip()), '')
-            allowed_types = TYPES_JSON if json_mode else TYPES
+                allowed_types = TYPES_JSON if mode == 'json' else TYPES
+            else:
+                allowed_types = TYPES
             if first.strip().startswith('#### '):
                 report.blocks += 1
                 sm = COND_SECTION_RE.match(first.strip())
