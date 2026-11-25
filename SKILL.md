@@ -1,6 +1,6 @@
 ---
 name: nbt-tree-format
-description: Render NBT structure as a hierarchical Markdown outline — one node per line with a type symbol, a bold name, a Chinese colon and a description; includes notation for polymorphism, recursion, mixed lists, open key sets and compound conditions. Also renders JSON trees when the block starts with a `「JSON」` marker (JSON types: `{}`, `[]`, `""`, `N`, `T/F`, `null`).
+description: 'Render NBT structure as a hierarchical Markdown outline — one node per line with a type symbol, a bold name, a Chinese colon and a description; includes notation for polymorphism, recursion, mixed lists, open key sets and compound conditions. Also renders JSON trees when the block starts with a `「JSON」` marker (JSON types: `{}`, `[]`, `""`, `N`, `T/F`, `null`).'
 whenToUse: >-
   Load when the user asks to output, restate, review or fix NBT structure as a tree
   ("用这种层级方式输出 NBT", "NBT 路径和说明", "按 NBT 层级整理"), when reading or dumping
