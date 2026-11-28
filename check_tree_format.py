@@ -3,9 +3,9 @@
 """check_tree_format.py — nbt-tree-format 的辅助校验脚本。
 
 扫描给定 Markdown 文件里所有 ```md 树块，按本技能的输出规则做机器校验：
-缩进网格、竖线贯穿、分支行（`↳`）、成员平铺（`（仅 …）`，含同一层多个判别键时
-按条件里的键认领多态行、跨键合取按键分别认领）、键集开放（`（开放键集，键为 …）`）、
-「条件「名称」」引用（须在树块外用「条件「名称」：…」定义）、复合标签子行、
+缩进网格、竖线贯穿、分支行（`↳`）、成员平铺（`（n 选一，判别键 X，成员平铺本级）`，
+含同一层多个判别键时按条件里的键认领多态行、跨键合取按键分别认领）、键集开放
+（`（开放键集，键为 …）`）、「条件「名称」」引用（须在树块外定义）、复合标签子行、
 行尾反斜杠、节点形状等。
 脚本只做「形态」检查，不判断类型/说明是否符合来源，那部分仍需人工自检。
 
@@ -115,8 +115,6 @@ def split_node(content, types=None):
     条件段是名称之后、冒号之前的部分，可为 None。
     """
     allowed = types or KNOWN_TYPES
-    if ': ' not in content:
-        return None
     idx = content.find(': ')
     if idx < 0:
         return None
@@ -174,8 +172,6 @@ BRANCH_TYPE_RE = re.compile(r'^((?:`[^`]+`\s*)+?)`([^`]+)`=(.*)$')
 def parse_branch_content(content, types=None):
     """解析分支行内容「type(s) `key`=value: description」，返回 (info, error)。"""
     allowed = types or TYPES
-    if ': ' not in content:
-        return None, 'branch row must contain ": "'
     idx = content.find(': ')
     if idx < 0:
         return None, 'branch row must contain ": "'
@@ -192,6 +188,14 @@ def parse_branch_content(content, types=None):
     if not desc.strip():
         return None, 'branch row has empty description'
     return {'types': tokens, 'key': m.group(2), 'value': m.group(3).strip()}, None
+
+
+def _entry(body, name=None, depth=-1, col=0, branch=False, sym=None, parent=None):
+    """构造一条行信息；辅助字段统一为空，解析后再填。"""
+    return {'depth': depth, 'col': col, 'branch': branch, 'sym': sym,
+            'content': body, 'body': body, 'has_more': False,
+            'name': name, 'types': None, 'condition': None,
+            'exempt': False, 'parent': parent}
 
 
 def parse_block(path, start, block, report, allowed_types=None):
@@ -217,10 +221,9 @@ def parse_block(path, start, block, report, allowed_types=None):
         if k == 0:
             root = split_node(body)
             if root and body == body.lstrip():
-                entry = {'depth': -1, 'col': 0, 'branch': False, 'sym': None, 'content': body,
-                         'body': body, 'has_more': False,
-                         'name': root['name'], 'types': root['types'],
-                         'condition': root['condition'], 'parent': None}
+                entry = _entry(body, name=root['name'])
+                entry['types'] = root['types']
+                entry['condition'] = root['condition']
                 entries.append(entry)
                 stack = [entry]
                 continue
@@ -228,9 +231,7 @@ def parse_block(path, start, block, report, allowed_types=None):
                 pass  # 片段示例：首行就是第 1 层
             else:
                 report.add(path, ln, 'root', 'root line must be `symbol`[ **name**]：description at column 0')
-                entry = {'depth': -1, 'col': 0, 'branch': False, 'sym': None, 'content': body,
-                         'body': body, 'has_more': False,
-                         'name': None, 'parent': None}
+                entry = _entry(body)
                 entries.append(entry)
                 stack = [entry]
                 continue
@@ -238,9 +239,7 @@ def parse_block(path, start, block, report, allowed_types=None):
         m = re.match(r'^([ \u2502]*)([\u251c\u2514\u21b3])(.?)', body)
         if not m:
             report.add(path, ln, 'tree-symbol', 'line has no tree symbol (├─/└─/↳)')
-            entries.append({'depth': -1, 'col': 0, 'branch': False, 'sym': None, 'content': body,
-                            'body': body, 'has_more': False,
-                            'name': None, 'parent': None})
+            entries.append(_entry(body))
             continue
         sym_idx = len(m.group(1))
         sym = m.group(2)
@@ -280,7 +279,7 @@ def parse_block(path, start, block, report, allowed_types=None):
             _parsed, err = parse_branch_content(content, allowed)
             if err and not exempt:
                 report.add(path, ln, 'branch', err)
-            if '**' in content.split(': ')[0]:
+            if not exempt and '**' in content.split(': ')[0]:
                 report.add(path, ln, 'branch', 'branch row must not have a bold name')
         else:
             node = split_node(content)
@@ -324,32 +323,6 @@ def parse_variant_marker(content):
                          '"\uff08n \u9009\u4e00\uff0c\u5224\u522b\u952e `X`\uff0c'
                          '\u6210\u5458\u5e73\u94fa\u672c\u7ea7\uff09"'}
     return {'key': m.group(2), 'start': m.start(), 'end': m.end()}
-
-
-def raw_condition_pairs(text):
-    """把「（仅 …）」里的条件解析成 [(key 或 None, value), ...]。
-
-    - 显式写法「（仅 `X`=`v`）」：key 是 X；
-    - 同一键的多个取值「（仅 `X`=`a`、`b`）」：裸值归给它前面最近的那个显式键；
-    - 跨键合取「（仅 `X`=`a` 且 `Y`=`b`）」：每个键各自成对；
-    - 简写「（仅 `v`）」：key 为 None。
-    """
-    kv = [(m.group(1), m.group(2), m.start(), m.end()) for m in COND_KV_RE.finditer(text)]
-    if not kv:
-        return [(None, v) for v in _backticks(text)]
-    pairs = [(key, value) for key, value, _s, _e in kv]
-    for m in TOKEN_RE.finditer(text):
-        if any(s <= m.start() < e for _k, _v, s, e in kv):
-            continue
-        token = m.group(1)
-        if token in TYPES:
-            continue
-        target = None
-        for key, _v, s, _e in kv:
-            if s < m.start():
-                target = key
-        pairs.append((target, token))
-    return pairs
 
 
 def marker_domain(content, marker):
@@ -663,10 +636,46 @@ def collect_files(paths):
     return files
 
 
+RULES_EPILOG = '''\
+report line format: FILE:LINE: [rule] message
+
+rule names:
+  backslash        missing trailing backslash or trailing whitespace before it
+  blank            blank line inside a tree block
+  grid             symbol column is not parent column + 4 (branch row: +3)
+  dash             "├"/"└" not followed by "─"
+  ancestor         "│" missing or wrong on an ancestor column
+  node             malformed node row, or empty description
+  type             unknown type symbol
+  branch           malformed branch row (format, spacing, bold name)
+  branch-parent    branch row without a "（n 选一）" parent row
+  children         container row without a child row
+  condition        bad condition, or 条件「…」 missing / empty / unused / undefined / cyclic
+  discriminator    bare discriminator key without a sibling row of that name
+  mixed            mixed-element list rows do not follow the two accepted forms
+  open-keyset      "（开放键集，键为 …）" incomplete, or the row is not a compound
+  variant          member-polymorphic marker incomplete
+  variant-member   condition key has no matching polymorphic row
+  variant-value    member value is not in the discriminator value set
+  variant-claim    discriminator value has no member row and no "无附加成员"
+  variant-mode     same object mixes branch rows and member flattening
+  root             malformed root row
+  tree-symbol      row has no "├─/└─/↳"
+  fence            unclosed code fence
+  non-tree         "md" block without tree rows
+  outer            malformed "#### … 分支" section
+  io               cannot read or write a file
+
+exit codes: 0 = no problems; 1 = problems found; 2 = argument or I/O error
+'''
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog='check_tree_format.py',
-        description='Validate ```md tree blocks against the nbt-tree-format skill rules.')
+        description='Validate ```md tree blocks against the nbt-tree-format skill rules.',
+        epilog=RULES_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('paths', nargs='+', metavar='FILE',
                         help='Markdown file(s) or directories (directories are searched recursively for *.md)')
     parser.add_argument('-o', '--output', metavar='FILE',
@@ -710,8 +719,8 @@ def main(argv=None):
                 continue
             first = next((ln for ln in block if ln.strip()), '')
             marker = re.match(r'(?i)^「(json(?:-nbt)?|snbt)」$', first.strip())
+            mode = marker.group(1).lower() if marker else None
             if marker:
-                mode = marker.group(1).lower()
                 block = block[1:]
                 start += 1
                 if not block:
@@ -719,9 +728,7 @@ def main(argv=None):
                     report.add(path, start, 'blank', 'empty JSON block')
                     continue
                 first = next((ln for ln in block if ln.strip()), '')
-                allowed_types = TYPES_JSON if mode == 'json' else TYPES
-            else:
-                allowed_types = TYPES
+            allowed_types = TYPES_JSON if mode == 'json' else TYPES
             if first.strip().startswith('#### '):
                 report.blocks += 1
                 sm = COND_SECTION_RE.match(first.strip())
