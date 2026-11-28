@@ -54,14 +54,15 @@
 - 根可以放在任意位置时不写名称（`` `{}`: 根标签 ``）；根必须是指定字段名时才写（`{}` **tag**: 父标签。）。
 - 整体输出必须包进 ```md 代码块（树外分支小节同样如此），以保留缩进。
 
-## JSON 与 JSON-NBT
+## JSON、JSON-NBT 与 SNBT
 
-同一套语法也可输出 JSON 相关结构，但树块第一行必须写标记（大小写不敏感）；标记行不是节点，根从第二行开始。
+同一套语法也可输出 JSON / SNBT 相关结构，但树块第一行必须写标记（大小写不敏感）；标记行不是节点，根从第二行开始。
 
 - `「JSON」`：直接存储的 JSON，用 JSON 类型：`{}` object、`[]` array、`""` string、`N` number、`T/F` boolean、`null` null。
 - `「JSON-NBT」`：NBT 里存的 JSON 字符串、后续会解释成 NBT；用 NBT 类型符号（`B`/`S`/`I`/`L`/`F`/`D`/`{}`/`[]`/`""`/`T/F`），不能用 `N`/`null`，因为解析后是强类型 NBT。
+- `「SNBT」`：NBT 的文本序列化形式；类型和 NBT 完全一样，直接用 NBT 类型符号，不需要任何映射。
 
-两者都必须单独成块，不能和普通 NBT 树或彼此混写。JSON 的 number 只有 `N`、array 只有 `[]`（元素可混合、不强制「（混合元素）」）；JSON-NBT 按目标 NBT 类型写，JSON number 在说明里注明对应类型，JSON null 按字段缺失处理并写清。
+三种块都必须单独成块，不能和普通 NBT 树或彼此混写。JSON 的 number 只有 `N`、array 只有 `[]`（元素可混合、不强制「（混合元素）」）；JSON-NBT 按目标 NBT 类型写，JSON number 在说明里注明对应类型，JSON null 按字段缺失处理并写清；SNBT 直接按 NBT 规则写，字段行建议标「（SNBT，内容见下）」。
 
 ```md
 「JSON」
@@ -81,9 +82,17 @@
          └─ `""` **id**: ID。\
 ```
 
+```md
+「SNBT」
+`{}`: 由 `tag` 的 SNBT 解析得到的 NBT 对象。\
+ ├─ `""` **id**: 物品 ID。\
+ ├─ `B` **Count**: 数量。\
+ └─ `[I]` **Pos**: 坐标。\
+```
+
 ## 辅助检查
 
-同目录的 `check_tree_format.py` 按本技能规则校验 Markdown 里的树块（缩进、竖线、分支行、条件段、子行、行尾 `\` 等）以及树外分支小节块；识别树块首行 `「JSON」` 后按 JSON 六种类型校验，识别 `「JSON-NBT」` 后按 NBT 类型校验。
+同目录的 `check_tree_format.py` 按本技能规则校验 Markdown 里的树块（缩进、竖线、分支行、条件段、子行、行尾 `\` 等）以及树外分支小节块；识别树块首行 `「JSON」` 后按 JSON 六种类型校验，`「JSON-NBT」` / `「SNBT」` 按 NBT 类型校验。
 
 ```bash
 python check_tree_format.py 报告.md -o check-report.txt

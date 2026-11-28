@@ -709,7 +709,7 @@ def main(argv=None):
                 report.add(path, start, 'blank', 'empty ```md block')
                 continue
             first = next((ln for ln in block if ln.strip()), '')
-            marker = re.match(r'(?i)^「(json(?:-nbt)?)」$', first.strip())
+            marker = re.match(r'(?i)^「(json(?:-nbt)?|snbt)」$', first.strip())
             if marker:
                 mode = marker.group(1).lower()
                 block = block[1:]

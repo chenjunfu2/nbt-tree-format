@@ -1,6 +1,6 @@
 ---
 name: nbt-tree-format
-description: 'Render NBT structure as a hierarchical Markdown outline — one node per line with a type symbol, a bold name, a Chinese colon and a description; includes notation for polymorphism, recursion, mixed lists, open key sets and compound conditions. Also renders JSON (`「JSON」` marker, JSON types: `{}`, `[]`, `""`, `N`, `T/F`, `null`) and JSON-encoded NBT (`「JSON-NBT」` marker, NBT type symbols) trees.'
+description: 'Render NBT structure as a hierarchical Markdown outline — one node per line with a type symbol, a bold name, a Chinese colon and a description; includes notation for polymorphism, recursion, mixed lists, open key sets and compound conditions. Also renders JSON (`「JSON」` marker, JSON types: `{}`, `[]`, `""`, `N`, `T/F`, `null`), JSON-encoded NBT (`「JSON-NBT」` marker, NBT type symbols), and SNBT (`「SNBT」` marker, NBT type symbols) trees.'
 whenToUse: >-
   Load when the user asks to output, restate, review or fix NBT structure as a tree
   ("用这种层级方式输出 NBT", "NBT 路径和说明", "按 NBT 层级整理"), when reading or dumping
@@ -12,7 +12,7 @@ whenToUse: >-
 # NBT Tree Format
 
 把 NBT 层级信息输出为「类型符号 + 加粗名称 + 英文冒号 + 说明」的树形 Markdown 大纲（多态另有写法：值类型多态见「多态键：分支行与树外单开」，成员多态见「多态：成员平铺」，跨键合取与命名条件见「跨键合取与条件命名」；键名由数据决定、无法枚举的映射见「键集开放」）。
-数据来源不限（源码定义、NBT 文件、dump、日志、用户口述等）；本技能只规定**输出形态**，不负责生成或修改 NBT 数据；JSON / JSON-NBT 见「JSON 与 JSON-NBT」。
+数据来源不限（源码定义、NBT 文件、dump、日志、用户口述等）；本技能只规定**输出形态**，不负责生成或修改 NBT 数据；JSON / JSON-NBT / SNBT 见「JSON 与 JSON-NBT」。
 
 ## 输出规则
 
@@ -432,10 +432,11 @@ whenToUse: >-
 
 ## JSON 与 JSON-NBT
 
-需要输出 JSON 相关结构时，树块**第一行**必须单独写以下标记之一，校验器据此切换模式；标记行不是节点，根节点从第二行开始。标记大小写不敏感（`「JSON」`、`「Json」`、`「json」`、`「JSON-NBT」`、`「Json-Nbt」` 等均可）。
+需要输出 JSON 或 SNBT 相关结构时，树块**第一行**必须单独写以下标记之一，校验器据此切换模式；标记行不是节点，根节点从第二行开始。标记大小写不敏感。
 
 - `「JSON」`：直接存储的 JSON 数据，用 JSON 类型体系描述。
 - `「JSON-NBT」`：NBT 里存的是 JSON 字符串，后续会被重写/解释成 NBT 结构；**用 NBT 类型体系描述**（NBT 是强类型，按 JSON 六类型写会丢掉类型信息）。
+- `「SNBT」`：NBT 的文本序列化形式（SNBT），直接按 NBT 类型写，见下。
 
 ### 「JSON」（直接存储的 JSON）
 
@@ -501,7 +502,27 @@ JSON 类型符号：
 ```
 ````
 
-自检：JSON/JSON-NBT 块必须首行标对应标记；`「JSON」` 只用六种 JSON 类型，出现 `B`/`S`/`I`/`L`/`F`/`D`/`[B]` 等即违规；`「JSON-NBT」` 只用 NBT 类型，出现 `N`/`null` 即违规；两种块都不得与普通 NBT 树混写。
+### 「SNBT」（NBT 的文本表示）
+
+SNBT 是 NBT 的字符串序列化形式，类型和 NBT 完全一样：直接用 NBT 类型符号（见「类型符号」），不需要任何映射规则，按 NBT 的格式要求写即可。
+
+- 必须**单独成块**，不能和普通 NBT 树、`「JSON」` 或 `「JSON-NBT」` 块混写。
+- 字段行（NBT 里的 `""`）说明里建议标「（SNBT，内容见下）」；SNBT 块的根说明写清由哪个字段的 SNBT 解析得到。
+- 其余行格式、缩进、条件段、成员平铺、命名条件、递归、键集开放、空集合、特殊豁免都复用 NBT 对应小节。
+
+示例：
+
+````md
+```md
+「SNBT」
+`{}`: 由 `tag` 的 SNBT 解析得到的 NBT 对象。\
+ ├─ `""` **id**: 物品 ID。\
+ ├─ `B` **Count**: 数量。\
+ └─ `[I]` **Pos**: 坐标。\
+```
+````
+
+自检：JSON/JSON-NBT/SNBT 块必须首行标对应标记；`「JSON」` 只用六种 JSON 类型，出现 `B`/`S`/`I`/`L`/`F`/`D`/`[B]` 等即违规；`「JSON-NBT」` 和 `「SNBT」` 只用 NBT 类型，出现 `N`/`null` 即违规；三种块都不得与普通 NBT 树或彼此混写。
 
 ## 特殊豁免（兜底）
 
