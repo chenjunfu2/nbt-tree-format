@@ -108,11 +108,26 @@ def extract_md_blocks(lines):
 
 
 
-def split_node(content, types=None):
-    """解析节点内容：type(s) [**name**] [condition]: description。
+def _parse_placeholder(rest):
+    """解析占位键「〈键说明〉」；返回 (placeholder, rest_after, error)。"""
+    end = rest.find('\u3009')
+    if end < 0:
+        return None, rest, 'placeholder key is missing the closing "\u3009"'
+    ph = rest[1:end].strip()
+    rest = rest[end + 1:].lstrip()
+    if not ph:
+        return None, rest, 'placeholder key is empty'
+    for bad in ('**', '`', ': ', '「', '」'):
+        if bad in ph:
+            return None, rest, 'placeholder key must not contain %r' % bad
+    return ph, rest, None
 
-    返回 dict(types, name, condition, desc)；无法识别时返回 None。
-    条件段是名称之后、冒号之前的部分，可为 None。
+
+def split_node(content, types=None):
+    """解析节点内容：type(s) [**name** | 〈placeholder〉] [condition]: description。
+
+    返回 dict(types, name, placeholder, condition, desc, error)；
+    无法识别时返回 None。条件段是名称之后、冒号之前的部分，可为 None。
     """
     allowed = types or KNOWN_TYPES
     idx = content.find(': ')
@@ -130,14 +145,19 @@ def split_node(content, types=None):
     if not found:
         return None
     name = None
+    placeholder = None
+    error = None
     if rest.startswith('**'):
         m = re.match(r'\*\*(.+?)\*\*', rest)
         if not m:
             return None
         name = m.group(1)
         rest = rest[m.end():].lstrip()
+    elif rest.startswith('\u3008'):
+        placeholder, rest, error = _parse_placeholder(rest)
     condition = rest.strip() or None
-    return {'types': found, 'name': name, 'condition': condition, 'desc': desc.strip()}
+    return {'types': found, 'name': name, 'placeholder': placeholder,
+            'condition': condition, 'desc': desc.strip(), 'error': error}
 
 
 COND_DESC_RE = re.compile('「([^」]+)」')
@@ -221,9 +241,14 @@ def parse_block(path, start, block, report, allowed_types=None):
         if k == 0:
             root = split_node(body)
             if root and body == body.lstrip():
+                if root.get('error'):
+                    report.add(path, ln, 'placeholder', root['error'])
+                elif root.get('placeholder'):
+                    report.add(path, ln, 'placeholder', 'root row must not be a placeholder key')
                 entry = _entry(body, name=root['name'])
                 entry['types'] = root['types']
                 entry['condition'] = root['condition']
+                entry['placeholder'] = root['placeholder']
                 entries.append(entry)
                 stack = [entry]
                 continue
@@ -274,6 +299,7 @@ def parse_block(path, start, block, report, allowed_types=None):
         name = None
         types = None
         condition = None
+        placeholder = None
         exempt = '（特殊描述）' in content
         if is_branch:
             _parsed, err = parse_branch_content(content, allowed)
@@ -286,10 +312,13 @@ def parse_block(path, start, block, report, allowed_types=None):
             if not node:
                 if not exempt:
                     report.add(path, ln, 'node', 'node must be `type` [**name**] [condition]：description')
+            elif node.get('error'):
+                report.add(path, ln, 'placeholder', node['error'])
             else:
                 name = node['name']
                 types = node['types']
                 condition = node['condition']
+                placeholder = node['placeholder']
                 for token in types:
                     if token not in allowed:
                         report.add(path, ln, 'type', 'unknown type symbol `%s`' % token)
@@ -297,10 +326,13 @@ def parse_block(path, start, block, report, allowed_types=None):
                     _pairs, _refs, cerr = parse_condition(condition)
                     if cerr:
                         report.add(path, ln, 'condition', cerr)
+                if placeholder and condition and not exempt:
+                    report.add(path, ln, 'placeholder',
+                               'placeholder row must not carry a condition; write it in the description')
         entry = {'depth': depth, 'col': sym_idx, 'branch': is_branch, 'sym': sym,
                  'content': content, 'body': body, 'has_more': False,
                  'name': name, 'types': types, 'condition': condition,
-                 'exempt': exempt, 'parent': parent}
+                 'placeholder': placeholder, 'exempt': exempt, 'parent': parent}
         entries.append(entry)
         stack.append(entry)
     return entries
@@ -374,7 +406,7 @@ def check_variants(path, start, entries, report):
     claimed = {id(m): set() for m in markers}
     external_containers = set()
     for i, e in enumerate(entries):
-        if e['branch'] or e['depth'] < 1 or e.get('exempt'):
+        if e['branch'] or e['depth'] < 1 or e.get('exempt') or e.get('placeholder'):
             continue
         cond = e.get('condition')
         if not cond:
@@ -473,9 +505,9 @@ def check_block(path, start, block, entries, report, allowed_types=None):
                 report.add(path, start + i, 'ancestor' if pos in bars else 'grid',
                            'column %d is %r, expected %r' % (pos, c, expect))
 
-    # 复合标签 / 列表必须有子行（混合元素列表的元素行是多类型行，天然不需要子行）
+    # 复合标签 / 列表必须有子行（混合元素列表的元素行是多类型行，天然不需要子行；占位键行豁免）
     for i, e in enumerate(entries):
-        if e['depth'] < 1 or e['branch'] or e.get('exempt'):
+        if e['depth'] < 1 or e['branch'] or e.get('exempt') or e.get('placeholder'):
             continue
         syms = e.get('types') or []
         if syms not in (['{}'], ['[]']):
@@ -534,6 +566,19 @@ def check_block(path, start, block, entries, report, allowed_types=None):
             report.add(path, start + i, 'branch-parent',
                        'parent row lacks "（n 选一，判别键 X）"')
 
+    # 占位键行只能作为「（开放键集，键为 …）」的 `{}` 的直接子行
+    for i, e in enumerate(entries):
+        if not e.get('placeholder') or e['depth'] < 1:
+            continue
+        parent = e['parent']
+        if parent is None:
+            report.add(path, start + i, 'placeholder',
+                       'placeholder row must be a child of an open-key-set row')
+        elif ('\uff08\u5f00\u653e\u952e\u96c6' not in parent['content']
+              or '{}' not in (parent.get('types') or [])):
+            report.add(path, start + i, 'placeholder',
+                       'placeholder row must be a child of a "（开放键集，键为 …）" compound row')
+
     # 「判别键 `X`」：裸名要求同层有该行；路径写法视为位置已明确
     for i, e in enumerate(entries):
         if e['depth'] < 1 or e['branch'] or e.get('exempt'):
@@ -556,6 +601,7 @@ def check_block(path, start, block, entries, report, allowed_types=None):
 
 OUTER_TITLE_RE = re.compile(r'^#### .+ 分支$')
 OUTER_ITEM_RE = re.compile(r'^- ((?:`[^`]+`\s*)+?)`([^`]+)`=(.+?): (.+)$')
+OUTER_ITEM_KEY_RE = re.compile(r'^- ((?:`[^`]+`\s*)+?)`([^`]+)`: (.+)$')
 
 
 def check_outer_section(path, start, block, report):
@@ -578,13 +624,20 @@ def check_outer_section(path, start, block, report):
             continue
         if s.startswith('- '):
             m = OUTER_ITEM_RE.match(s)
-            if not m:
-                report.add(path, start + k, 'outer',
-                           'branch item must be "- type(s) `key`=value：description"')
+            if m:
+                for token in re.findall(r'`([^`]+)`', m.group(1)):
+                    if token not in TYPES:
+                        report.add(path, start + k, 'type', 'unknown type symbol `%s`' % token)
                 continue
-            for token in re.findall(r'`([^`]+)`', m.group(1)):
-                if token not in TYPES:
-                    report.add(path, start + k, 'type', 'unknown type symbol `%s`' % token)
+            mk = OUTER_ITEM_KEY_RE.match(s)
+            if mk:
+                for token in re.findall(r'`([^`]+)`', mk.group(1)):
+                    if token not in TYPES:
+                        report.add(path, start + k, 'type', 'unknown type symbol `%s`' % token)
+                continue
+            report.add(path, start + k, 'outer',
+                       'branch item must be "- type(s) `key`=value: description" '
+                       'or "- type(s) `key`: description"')
             continue
         if s.startswith('#'):
             continue
@@ -654,6 +707,7 @@ rule names:
   discriminator    bare discriminator key without a sibling row of that name
   mixed            mixed-element list rows do not follow the two accepted forms
   open-keyset      "（开放键集，键为 …）" incomplete, or the row is not a compound
+  placeholder      placeholder row "〈…〉" bad content, wrong parent, or carries a condition
   variant          member-polymorphic marker incomplete
   variant-member   condition key has no matching polymorphic row
   variant-value    member value is not in the discriminator value set
